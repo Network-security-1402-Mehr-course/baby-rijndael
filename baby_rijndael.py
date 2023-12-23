@@ -9,7 +9,7 @@ class BabyRijndael:
     State = list[Col]
     Key = State
 
-    block_size  = 2
+    block_size = 2
 
     s_table = [10, 4, 3, 11, 8, 14, 2, 12, 5, 7, 6, 15, 0, 1, 9, 13]
 
