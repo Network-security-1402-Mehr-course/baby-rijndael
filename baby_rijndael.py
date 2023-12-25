@@ -1,172 +1,103 @@
-from functools import reduce
-from typing import Callable, Self
+from functools import cache
+
+from numpy import array, flip, fromiter, ndarray, packbits, uint8, unpackbits
+from numpy.typing import NDArray
 
 
 class BabyRijndael:
     "https://citeseerx.ist.psu.edu/document?repid=rep1&type=pdf&doi=f7adc1d021ade59b4cb8d68d45a82b07e8ad737b"
 
-    Col = list[int]
-    State = list[Col]
-    Key = State
+    BLOCK_BYTES = 2
+    KEY_BYTES = BLOCK_BYTES
 
-    block_size = 2
+    @staticmethod
+    def reverse_column(column: uint8) -> uint8:
+        return uint8((column % 16 << 4) + (column // 16))
 
-    s_table = [10, 4, 3, 11, 8, 14, 2, 12, 5, 7, 6, 15, 0, 1, 9, 13]
+    @staticmethod
+    def y(i: int):
+        return 2 ** (i + 3)
 
-    t = [
-        [1, 1, 1, 0, 0, 0, 1, 0],
-        [0, 1, 1, 1, 0, 0, 0, 1],
-        [1, 0, 1, 0, 1, 0, 0, 1],
-        [0, 1, 0, 1, 1, 1, 0, 1],
-        [0, 0, 1, 0, 1, 1, 1, 0],
-        [0, 0, 0, 1, 0, 1, 1, 1],
-        [1, 0, 0, 1, 1, 0, 1, 0],
-        [1, 1, 0, 1, 0, 1, 0, 1],
-    ]
-
-    ti = [
-        [0, 1, 1, 0, 0, 1, 1, 1],
-        [0, 0, 1, 1, 1, 0, 1, 0],
-        [1, 0, 0, 0, 0, 1, 0, 1],
-        [0, 1, 0, 0, 1, 0, 1, 1],
-        [0, 1, 1, 1, 0, 1, 1, 0],
-        [1, 0, 1, 0, 0, 0, 1, 1],
-        [0, 1, 0, 1, 1, 0, 0, 0],
-        [1, 0, 1, 1, 0, 1, 0, 0],
-    ]
+    s_box_table = [10, 4, 3, 11, 8, 14, 2, 12, 5, 7, 6, 15, 0, 1, 9, 13]
+    t = array(
+        [
+            [1, 1, 1, 0, 0, 0, 1, 0],
+            [0, 1, 1, 1, 0, 0, 0, 1],
+            [1, 0, 1, 0, 1, 0, 0, 1],
+            [0, 1, 0, 1, 1, 1, 0, 1],
+            [0, 0, 1, 0, 1, 1, 1, 0],
+            [0, 0, 0, 1, 0, 1, 1, 1],
+            [1, 0, 0, 1, 1, 0, 1, 0],
+            [1, 1, 0, 1, 0, 1, 0, 1],
+        ],
+        dtype=uint8,
+    )
 
     @classmethod
-    def xor(cls, *cols: Col) -> Col:
-        return reduce(lambda x, y: [i ^ j for i, j in zip(x, y)], cols, [0, 0])
+    @cache
+    def s(cls, column: uint8) -> uint8:
+        return uint8(
+            (cls.s_box_table[int(column) // 16] << 4)
+            + cls.s_box_table[int(column) % 16]
+        )
 
-    @classmethod
-    def reverse(cls, col: Col) -> Col:
-        return list(reversed(col))
+    def __init__(self, key: NDArray[uint8]) -> None:
+        assert key.shape == (self.KEY_BYTES,)
 
-    @classmethod
-    def mat_mult(cls, a: list[list[int]], b: list[list[int]]):
-        ars = len(a[0])
-
-        bcs = len(b)
-        brs = len(b[0])
-
-        ans = [[0 for _ in range(ars)] for _ in range(bcs)]
-
-        for arow in range(ars):
-            for bcol in range(bcs):
-                for i in range(brs):
-                    ans[bcol][arow] += a[i][arow] * b[bcol][i]
-
-        return ans
-
-    @classmethod
-    def mat_mod(cls, a: list[list[int]], base: int):
-        return [[i % base for i in j] for j in a]
-
-    @classmethod
-    def s(cls, col: Col) -> Col:
-        return [cls.s_table[i] for i in col]
-
-    @classmethod
-    def y(cls, i: int) -> Col:
-        return [2 ** (i - 1), 0]
-
-    @classmethod
-    def r(
-        cls, i: int
-    ) -> Callable[[Self,], None]:
-        def round(br: BabyRijndael):
-            br.sub_bytes()
-            br.shift_rows()
-            if i < 4:
-                br.mix_columns()
-
-            br.apply_round_key(i)
-
-        return round
-
-    @classmethod
-    def ri(
-        cls, i: int
-    ) -> Callable[[Self,], None]:
-        def round_inverse(br: BabyRijndael):
-            br.apply_round_key(i)
-            if i < 4:
-                br.mix_columns_inverse()
-
-            br.shift_rows()
-            br.sub_bytes_inverse()
-
-        return round_inverse
-
-    def __init__(self, state: State, key: Key):
-        assert len(state) == len(key) == self.block_size
-        self.state = state
         self.key = key
 
-    def w(self, i: int) -> Col:
+    def w(self, i: int) -> uint8:
         if i < 2:
             return self.key[i]
 
         if i % 2:
-            return self.xor(self.w(i - 2), self.w(i - 1))
+            return self.w(i - 2) ^ self.w(i - 1)
 
-        return self.xor(
-            self.w(i - 2),
-            self.s(self.reverse(self.w(i - 1))),
-            self.y(i // 2),
+        return (
+            self.w(i - 2) ^ self.s(self.reverse_column(self.w(i - 1))) ^ self.y(i // 2)
         )
 
-    def k(self, i: int) -> Key:
-        return [self.w(2 * i), self.w(2 * i + 1)]
-
-    def sub_bytes(self):
-        self.state = [[self.s_table[i] for i in j] for j in self.state]
-
-    def sub_bytes_inverse(self):
-        self.state = [[self.s_table.index(i) for i in j] for j in self.state]
-
-    def shift_rows(self):
-        self.state[0][1], self.state[1][1] = self.state[1][1], self.state[0][1]
-
-    def state_bit_column(self, col: Col) -> list[int]:
-        return [1 if 2**j & i else 0 for i in col for j in reversed(range(4))]
-
-    def state_bit_matrix(self) -> list[list[int]]:
-        return [self.state_bit_column(col) for col in self.state]
-
-    def set_state_from_bit_matrix(self, bit_matrix: list[list[int]]):
-        self.state = [[0 for _ in range(2)] for _ in range(2)]
-        for i in range(2):
-            for j in range(8):
-                self.state[i][j // 4] += bit_matrix[i][j] * 2 ** ((7 - j) % 4)
-
-    def mix_columns(self):
-        self.set_state_from_bit_matrix(
-            self.mat_mod(
-                self.mat_mult(self.t, self.state_bit_matrix()),
-                2,
-            )
+    def k(self, i: int) -> NDArray[uint8]:
+        return ndarray(
+            (self.BLOCK_BYTES,),
+            uint8,
+            bytes(self.w(2 * i + j) for j in range(self.BLOCK_BYTES)),
         )
 
-    def mix_columns_inverse(self):
-        self.set_state_from_bit_matrix(
-            self.mat_mod(
-                self.mat_mult(self.ti, self.state_bit_matrix()),
-                2,
-            )
-        )
+    def apply_sbox(self, blocks: NDArray[uint8]):
+        for i in range(len(blocks)):
+            blocks[i] = fromiter((self.s(j) for j in blocks[i]), uint8)
 
-    def apply_round_key(self, i: int):
-        self.state = [self.xor(self.state[j], self.k(i)[j]) for j in range(2)]
+    def shift_rows(self, blocks: NDArray[uint8]):
+        second_rows = ndarray(blocks.shape, uint8, blocks % 16)
+        blocks -= second_rows
+        blocks += flip(second_rows, 1)
 
-    def encrypt(self):
-        self.apply_round_key(0)
-        for i in range(1, 5):
-            self.r(i)(self)
+    def mix_columns(self, blocks: NDArray[uint8]):
+        temp = unpackbits(blocks.reshape(-1, 2, 1), axis=2)
+        temp @= self.t
+        temp %= 2
+        temp = packbits(temp, axis=2)
+        temp = temp.reshape(-1, 2)
+        for i, col in enumerate(temp):
+            blocks[i] = col
 
-    def decrypt(self):
-        for i in reversed(range(1, 5)):
-            self.ri(i)(self)
+    def apply_round(
+        self, blocks: NDArray[uint8], i: int, omit_column_mix: bool = False
+    ):
+        self.apply_sbox(blocks)
+        self.shift_rows(blocks)
+        if not omit_column_mix:
+            self.mix_columns(blocks)
 
-        self.apply_round_key(0)
+        blocks ^= self.k(i)
+
+    def encrypt(self, blocks: NDArray[uint8]):
+        assert blocks.ndim == 2 and blocks.shape[1] == self.BLOCK_BYTES
+
+        blocks ^= self.k(0)
+
+        for i in range(1, 4):
+            self.apply_round(blocks, i)
+
+        self.apply_round(blocks, 4, True)
